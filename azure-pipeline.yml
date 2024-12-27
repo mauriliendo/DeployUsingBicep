@@ -1,0 +1,99 @@
+trigger:
+  - main
+
+variables:
+  - group: azure-credentials # create variable gruop in Azure Devops
+  - name: vmName 
+    value: 'vmname' # VM name
+  - name: resourceGroupName
+    value: 'rgname' # Resource group name
+  - name: location
+    value: 'eastus'
+  - name: keyVaultName
+    value: 'keyvautlname'
+
+stages:
+- stage: Validate
+  jobs:
+  - job: ValidateBicepTemplate
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Validar Template Bicep'
+      inputs:
+        azureSubscription: 'serviceconnection-name' # Create a service connection in Azure Devops
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az --version
+          az bicep build --file $(System.DefaultWorkingDirectory)/infrastructure/main.bicep
+          
+          az deployment group validate `
+            --resource-group $(resourceGroupName) `
+            --template-file $(System.DefaultWorkingDirectory)/infrastructure/main.bicep `
+            --parameters `
+              vmName=$(vmName) `
+              adminUsername=$(adminUsername) `
+              adminPassword=$(adminPassword) `
+              location=$(location)
+
+- stage: Deploy
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+  - job: DeployVirtualMachine
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Deploy VM with Bicep'
+      inputs:
+        azureSubscription: 'serviceconnection-name' # Create a service connection in Azure Devops
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Use full path with forward slashes
+          $bicepFilePath = "$(System.DefaultWorkingDirectory)/infrastructure/main.bicep".Replace('\', '/')
+          
+          # Verify file exists
+          if (Test-Path $bicepFilePath) {
+            Write-Host "Deploying Bicep template from: $bicepFilePath"
+            
+            az deployment group create `
+              --resource-group "$(resourceGroupName)" `
+              --template-file "$bicepFilePath" `
+              --parameters `
+                vmName="$(vmName)" `
+                adminUsername="$(adminUsername)" `
+                adminPassword="$(adminPassword)" `
+                location="$(location)"
+          }
+          else {
+            Write-Error "Bicep file not found at $bicepFilePath"
+            exit 1
+          }
+
+- stage: InstallApplication
+  jobs:
+  - job: RunPowershell
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: "Descargar el repositorio principal"
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'serviceconnection-name' # Create a service connection in Azure Devops
+        scriptType: 'bash'
+        addSpnToEnvironment: true
+        subscriptionId: 'subscription-ID' # copy subscription ID where the VM is running
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          scriptContent=$(cat "$(System.DefaultWorkingDirectory)/scripts/install-tools.ps1")
+          
+          az vm run-command invoke \
+            --name "$(vmName)" \
+            --resource-group "$(resourceGroupName)" \
+            --command-id RunPowerShellScript \
+            --scripts "$scriptContent"
